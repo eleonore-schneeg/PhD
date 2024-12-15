@@ -1,0 +1,903 @@
+---
+title: "Chapter 3 workflow"
+author: "Eléonore Schneegans"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    theme: "flatly"
+    toc: yes
+    toc_float: yes
+    fig_caption: yes
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+vignette: |
+  %\vignetteIndexEntry{Omix - Pseudotemporal multi-omics integration} 
+  %\vignetteEngine{knitr::rmarkdown}
+  %\vignetteEncoding{UTF-8}
+editor_options:
+  markdown: 
+  wrap: 72
+---
+
+# Chapter 3
+
+**Title**: Integrative multi-omics reveal glial signatures associated with accelerated cognitive decline in Alzheimer’s disease
+
+**Overview**:
+
+-   Data Integration: Using Omix, transcriptomics and proteomics data are integrated to identify modules representing distinct     biological mechanisms in a discovery cohort.
+
+-   Projection on ROSMAP Data: These modules are projected onto publicly available early AD (Braak III-IV) data from the ROSMAP     cohort.
+
+-   Molecular Subgroup Identification: Multi-omics clustering is employed to identify molecular subgroups in early AD.
+
+-   Progression Analysis: The subgroups are analysed for differences in disease progression using Kaplan-Meier survival     analysis.
+
+-   Disease mechanisms activity assessment: The activity of biological mechanisms (module eigenvalues) identified in the discovery cohort is compared between the molecular subgroups in the ROSMAP cohort.
+
+**Summary of methods**:
+
+-   Data Pre-processing: Quality control, normalisation, and denoising of RNA and proteomics data.
+
+-   Integration Models: MOFA for bulk transcriptomics-proteomics integration and iCluster for molecular subtyping.
+
+-   Downstream analyses:
+    -   Community detection within multi-omics transcriptomics-proteomics co-expression networks.
+
+    -   Transcriptomics-proteomics module eigenvalue computation and correlation with neuropathological features.
+    
+    -   Cell type and pathway enrichment analyses.
+
+**Impact**:
+
+This analysis offers a deepened understanding of the biological mechanisms underlying glial activation and cognitive decline in AD, facilitating the identification of novel biomarkers and potential therapeutic targets. The pipeline also establishes a scalable framework for integrating multi-omics data in other neurodegenerative conditions.
+
+Some of these analyses are available in my pre-print: medRxiv 2024.08.27.24312641; doi: https://doi.org/10.1101/2024.08.27.24312641
+
+**Omix package**:
+
+-   Available on github: https://github.com/eleonore-schneeg/Omix
+-   Documentation available: https://eleonore-schneeg.github.io/Omix/index.html
+
+
+# Part I - Transcriptomics-proteomics integration in the discovery cohort using Omix
+
+The goal of Omix is to provide tools in R to build a complete analysis workflow 
+for integrative analysis of data generated from multi-omics platform.
+
+-   Generate a multi-omics object using `MultiAssayExperiment`.
+
+-   Quality control of single-omics data.
+
+-   Formatting, normalisation, denoising of single-omics data.
+
+-   Separate single-omics analyses.
+
+-   Integration of multi-omics data for combined analysis. 
+
+-   Publication quality plots and interactive analysis reports based of shinyApp.
+
+Currently, Omix supports the integration of bulk transcriptomics and bulk proteomics.
+
+## Running *Omix*
+
+The `Omix` pipeline requires the following input:
+
+The following datasets are required to run the Omix pipeline:
+
+| Dataset                  | Description                                         | Format  |
+|--------------------------|-----------------------------------------------------|---------|
+| `rawdata_rna`            | RNA raw counts, genes as rows, samples as columns   | CSV     |
+| `rawdata_protein`        | Protein abundances, proteins as rows, samples as columns | CSV     |
+| `map_rna`                | Mapping of RNA sample IDs to metadata               | CSV     |
+| `map_protein`            | Mapping of protein sample IDs to metadata           | CSV     |
+| `metadata_rna`           | RNA-specific metadata                               | CSV     |
+| `metadata_protein`       | Protein-specific metadata                           | CSV     |
+| `individual_metadata`    | Individual-level metadata for both assays           | CSV     |
+
+---
+
+Call required packages for workflow:
+
+```{r results='asis', message=FALSE, warning=FALSE}
+library(Omix)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(DT)
+library(survival)
+library(survminer)
+```
+
+First, we must load the data from Omix for the workflow:
+
+```{r results='asis', message=FALSE, warning=FALSE}
+
+outputDir <- tempdir()
+ctd_fp <-file.path(outputDir, "ctd.rds")
+ensembl_fp  <-file.path(outputDir, "ensembl.rds")
+
+
+download.file(url = "https://raw.githubusercontent.com/eleonore-schneeg/OmixData/main/ctd-2.rds",destfile=ctd_fp)
+download.file(url = "https://raw.githubusercontent.com/eleonore-schneeg/OmixData/main/ensembl_mappings_human.tsv",destfile=ensembl_fp)
+
+
+ctd <-  readRDS(paste0(outputDir,'/ctd.rds'))
+ensembl <-read.delim(file=paste0(outputDir,'/ensembl.rds'), sep = '\t', header = TRUE)
+rna_qc_data_matrix <- NULL
+
+
+```
+
+
+Download omics data for analysis 
+
+```{r ,results='hide', warning=FALSE, message=FALSE}
+
+
+outputDir <- tempdir()
+
+download_data <- function(url, dest) {
+  download.file(url = url, destfile = dest, mode = "wb")
+}
+
+# Define file paths
+files <- list(
+  raw_counts = file.path(outputDir, "raw_counts.csv"),
+  raw_proteomics = file.path(outputDir, "raw_proteomics.csv"),
+  map_transcriptomics = file.path(outputDir, "map_transcriptomics.csv"),
+  map_proteomics = file.path(outputDir, "map_proteomics.csv"),
+  metadata_transcriptomics = file.path(outputDir, "metadata_transcriptomics.csv"),
+  metadata_proteomics = file.path(outputDir, "metadata_proteomics.csv"),
+  sample_metadata = file.path(outputDir, "sample_metadata.csv")
+)
+
+urls <- list(
+  raw_counts = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/raw_counts.csv",
+  raw_proteomics = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/raw_proteomics.csv",
+  map_transcriptomics = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/map_transcriptomics.csv",
+  map_proteomics = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/map_proteomics.csv",
+  metadata_transcriptomics = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/metadata_transcriptomics.csv",
+  metadata_proteomics = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/metadata_proteomics.csv",
+  sample_metadata = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/sample_metadata.csv"
+)
+
+# Download files
+Map(download_data, urls, files)
+
+
+raw_counts<-  read.csv(files$raw_counts,header=T, stringsAsFactors = F, row.names=1 , check.names = FALSE)
+raw_proteomics<-  read.csv(files$raw_proteomics,header=T, stringsAsFactors = F, row.names=1, check.names = FALSE)
+map_transcriptomics<-  read.csv(files$map_transcriptomics,header=T, stringsAsFactors = F, row.names=1, check.names = FALSE)
+map_proteomics<-  read.csv(files$map_proteomics,header=T, stringsAsFactors = F, row.names=1 ,check.names = FALSE)
+metadata_transcriptomics<-  read.csv(files$metadata_transcriptomics,header=T, stringsAsFactors = F, row.names=1, check.names = FALSE)
+metadata_proteomics<-  read.csv(files$metadata_proteomics,header=T, stringsAsFactors = F, row.names=1, check.names = FALSE)
+sample_metadata<-  read.csv(files$sample_metadata,header=T, stringsAsFactors = F, row.names=1, check.names = FALSE)
+
+```
+
+
+Sanity checks
+
+```{r}
+
+all(rownames(metadata_transcriptomics) == colnames(raw_counts))
+all(rownames(metadata_proteomics) == colnames(raw_proteomics))
+
+```
+
+
+### Raw rna counts
+
+`rawdata_rna` is a data-frame of raw counts, with features as rows and samples as columns
+
+```{r}
+print(raw_counts[1:5,1:5])
+```
+
+
+### Raw protein abundance
+
+`rawdata_protein` is a data-frame of raw protein abundances, with features as rows and samples as columns
+
+```{r}
+print(raw_proteomics[10:15,10:15])
+```
+
+### Maps
+
+Maps are data frame containing two columns: `primary` and `colname`. 
+The `primary` column should be the individual ID the individual metadata, and the 
+`colname` the matched sample names from the raw matrices columns. If sample and
+individual ids are the same, maps aren't needed (primary and colnames are the same).
+
+```{r}
+print(head(map_transcriptomics))
+print(head(map_proteomics))
+```
+
+### Technical metadata
+
+Technical metadata are data-frames contain the column `colname` that should match
+the sample names in the raw matrices, and any additional columns related to technical artefacts like batches 
+
+```{r}
+print(head(metadata_transcriptomics))
+print(head(metadata_proteomics))
+```
+
+
+### Individual metadata
+
+`individual_metadata` contains individual level metadata, where one column matches the `primary` column in maps.
+
+```{r,message=FALSE, warning=FALSE}
+
+library(table1)
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        # For numeric variables, perform a standard 2-sample t-test
+        p <- t.test(y ~ g)$p.value
+    } else {
+        # For categorical variables, perform a chi-squared test of independence
+        p <- chisq.test(table(y, g))$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+sample_metadata$diagnosis=as.factor(sample_metadata$diagnosis)
+sample_metadata$brain_region=as.factor(sample_metadata$brain_region)
+
+table1(~ Braak + PMD + age + trem2 + amyloid + AT8 + PHF1 | diagnosis,
+    data=sample_metadata[sample_metadata$brain_region=="MTG",], overall=F, extra.col=list(`P-value`=pvalue))
+```
+
+
+##  Step one - Generate a MultiAssayExperiment object
+
+To run Omix, we first need to generate a multi-omics object
+The package currently supports transcriptomics and proteomics bulk data only.
+
+
+```{r  warning=FALSE}
+
+#Generate multiassay object
+multiomics_regional=generate_multiassay(rawdata_rna =raw_counts,
+                                        rawdata_protein = raw_proteomics,
+                                        individual_to_sample=FALSE,
+                                        map_rna = map_transcriptomics,
+                                        map_protein = map_proteomics,
+                                        metadata_rna = metadata_transcriptomics,
+                                        metadata_protein = metadata_proteomics,
+                                        individual_metadata = sample_metadata,
+                                        map_by_column = 'sample_id',
+                                        rna_qc_data=FALSE,
+                                        rna_qc_data_matrix=NULL,
+                                        organism='human')
+
+```
+The MultiAssayExperiment object was succesfully created. 
+The following steps will process and perform QC on each omic layers of the 
+`multiomics_object` object.
+
+
+## Step two - Process transcriptomics data
+
+```{r  warning=FALSE}
+multiomics_regional=process_rna(multiassay=multiomics_regional,
+                                transformation='vst',
+                                protein_coding=FALSE,
+                                min_count = 10,
+                                min_sample = 0.5,
+                                dependent =  "diagnosis",
+                                levels = c("Control","AD"),
+                                covariates=c('age','sex','PMD'),
+                                filter=TRUE,
+                                batch_correction=TRUE,
+                                batch="seq_batch",
+                                remove_sample_outliers= FALSE)
+
+```
+
+## Step three - Process proteomics data
+
+```{r  warning=FALSE}
+multiomics_regional=process_protein(
+  multiassay=multiomics_regional,
+  filter=TRUE,
+  min_sample = 0.5,
+  dependent =  "diagnosis",
+  levels = c("Control","AD"),
+  imputation = 'minimum_value',
+  remove_feature_outliers= FALSE,
+  batch_correction= TRUE,
+  batch="batch",
+  correction_method="median_centering",
+  remove_sample_outliers=FALSE,
+  denoise=TRUE,
+  covariates=c('PMD','sex','age'))
+```
+
+
+## Step four - Vertical integration
+
+**Omix** supports a range of vertical integration models:
+
+-   Possible integration methods are `MOFA`,`DIABLO`,`sMBPLS`,`iCluster`,`MEIFESTO`
+
+-   The choice of the integration models depends on the research use case of interest.
+
+-   Here we display the use of **Omix** on a popular integration method, MOFA or Multi-Omics Factor analysis (Argelaguet et al. 2018).
+
+
+> In this workflow, we proceed with a multi-omics integration of 56 brain Alzheimer's disease (AD) and Control samples coming from two brain regions
+
+> -   The somatosensory cortext (SOM)
+
+> -   The middle frontal gyrus (MTG)
+
+ The MTG is known to be affected earlier during AD progression, while SOM at later stages. Using these two regions as pseudotemporal proxi in the integrative process, we are able to gain a deeper understanding of biological mechanisms that occur during AD progression.
+ 
+## Transcriptomics-proteomics integration using MOFA (Multi-Omics Factor Analysis)
+
+
+```{r warning=FALSE, eval=FALSE }
+
+multiomics_regional=vertical_integration(multiassay=multiomics_regional,
+                                         slots = c(
+                                           "rna_processed",
+                                           "protein_processed"
+                                         ),
+                                         integration='MOFA',
+                                         ID_type = "gene_name",
+                                         dependent='diagnosis',
+                                         intersect_genes = FALSE,
+                                         num_factors = 15,
+                                         scale_views = TRUE,
+                                         most_variable_feature=TRUE)
+```
+
+
+
+## Optional: load a pretrained model 
+
+Since package version slightly affect model outputs, we reload a pre-trained model.
+
+```{r}
+multiomics_regional <- readRDS("~/MSD/multiomics_regional_pretrained.rds") # load pre-trained model 
+```
+
+
+## Step five - Post integration downstream analyses 
+
+**Omix** provides a range of built-in downstream analyses functions and visualisations.
+All downstream analyses will be performed on the integrated object stored in the `integrated` slot.
+
+## Load integrated object
+
+```{r, message=FALSE}
+integrated_object=multiomics_regional@metadata$integration$MOFA
+metadata=integrated_object@samples_metadata
+```
+
+```{r}
+plot=correlation_heatmap(integrated_object,
+                         covariates=c("age","PMD",'AD','MTG','SOM',
+                                      'amyloid','AT8','PHF1',
+                                      'Early','Mid','Late'))
+
+```
+
+## Factor explorations 
+
+### Variance explained 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+MOFA2::plot_variance_explained(integrated_object, max_r2=5)
+```
+
+Factors 14 is chosen downstream analysis:
+
+-   Strongly correlated with neuropathological variables including PHF1 and amyloid.
+
+-   Some level of shared variance across modalities 
+
+Factor 1, 7 and 11 are also chosen for downstream analysis in the pre-print, though are not shown in this workflow.
+
+
+## Extract features that are driving Factor 14 based on feature weights 
+
+Weights vary from -1 to +1, and provide a score for how strong each feature relates to each factor, hence allowing a biological interpretation of the latent factors. 
+Features with no association with the factor have values close to zero, while genes with strong association with the factor have large absolute values. 
+
+The sign of the weight indicates the direction of the effect: 
+
+-   A positive weight indicates that the feature has higher levels in the samples with positive factor values.
+
+-   A negative weight indicate higher levels in samples with negative factor values.
+
+
+The `extract_weigths`function enable to extract the weights on the desired factor at a defined absolute threshold (1.5 SD from the mean), and return an object with positive and negative weights above and below this threshold respectively.
+It also returns QC plots
+
+-   A distribution of the feature weights for each omic layer at the designated factor
+
+-   The relationship between the feature/`sense_check_variable` correlation and weights. High weights should coincide with stronger correlation if the `sense_check_variable` is an important driver of variation in the designated factor.
+
+
+```{r}
+weights14=extract_weigths(integrated_object,
+                          factor=14,
+                          threshold=1.5,
+                          sense_check_variable='PHF1')
+```
+
+### Weights distribution in Factor 14
+
+```{r}
+weights14$distribution_plot$rna  
+weights14$distribution_plot$protein 
+
+```
+
+
+### Correlation to PHF1 and weights in Factor 14
+
+```{r}
+weights14$weights_cor_plot$rna
+weights14$weights_cor_plot$protein
+```
+
+## Negative weights in factor 14: Up-regulated in later stage AD
+
+A negative weight indicates that the feature has higher levels in the samples with negative factor values, which in this analysis coincides with later Braak stages.
+
+```{r echo=TRUE}
+integrated_object@samples_metadata$Braak=as.factor(integrated_object@samples_metadata$Braak)
+MOFA2::plot_factor(integrated_object, 
+            factors = 14, 
+            color_by = "Braak",
+            add_violin = TRUE,
+            dodge = TRUE
+)
+
+
+```
+
+
+## Multi-omics network 
+
+Based on the features (genes and proteins) selected to be more than 1.5 SD away from the mean, we build a co-expression network of genes and proteins. An edge is drawn between features that have a correlation => 0.3 (moderate correlation)
+
+
+```{r echo=TRUE}
+Weights14_up=multiomics_network(multiassay=multiomics_regional,
+                                  list=weights14$weights$ranked_weights_positive,
+                                  correlation_threshold =0.3,
+                                  filter_string_50= FALSE)
+
+
+
+```
+
+### Community detection within multi-omic network
+
+
+The next step of the analysis is to find densily co-expressed communities of proteins and RNAs within the multi-omics network.
+ 
+This function tries to find densely connected subgraphs in a graph by calculating the leading non-negative eigenvector of the modularity matrix of the graph.
+
+
+```{r}
+communities14 <- communities_network(igraph=Weights14_up$graph,
+                                     community_detection='leading_eigen')
+
+plot_communities(igraph=Weights14_up$graph,communities14$community_object)
+```
+
+This table summaries the memberships of the four detected modules.
+
+```{r, echo=FALSE,results='hide', warning=FALSE, message=FALSE}
+
+df <- purrr::map_dfr(
+    .x = communities14$communities,
+    .f = ~ tibble::enframe(
+      x = .x,
+      name = NULL,
+      value = "feature"
+    ),
+    .id = "community"
+  )
+
+DT::datatable(
+    df,
+    rownames = FALSE,
+    extensions = 'Buttons',
+    options = list(
+        dom = 'Blfrtip',
+         buttons = list('colvis', list(extend = 'copy', exportOptions = list(columns=':visible')),
+                                            list(extend = 'csv', exportOptions = list(columns=':visible')),
+                                            list(extend = 'excel', exportOptions = list(columns=':visible')))))
+```
+
+## Cell type enrichment of modules
+
+Here we proceed with a `EWCE` analysis to check if modules are enriched in specific cell types.
+
+
+```{r ,results='hide', warning=FALSE, message=FALSE}
+com=lapply(communities14$communities,function(x){sub("\\_.*", "",x )})
+com=lapply(com,function(x){sub("\\..*", "",x )})
+com=lapply(com,function(x) {x[!duplicated(x)]})
+
+cell_type14 <- cell_type_enrichment(
+  multiassay =multiomics_regional,
+  communities = com,
+  ctd= ctd
+)
+
+cell_type14$plots
+```
+
+- Module 1 is enriched for microglial genes and module 2 is enriched for astrocytes.
+
+
+### Community detection within multi-omic network
+
+
+Let's look at the features in more details:
+
+### Community 1 - Microglia
+
+```{r , warning=FALSE}
+
+community_1=community_graph(igraph=Weights14_up$graph,
+                            community_object=communities14$community_object,
+                            community=1)
+interactive_network(igraph=community_1$graph,communities=FALSE)
+```
+
+
+### Community hubs 
+
+-   Features are more or less connected in the network, represented by their hub score: 
+
+```{r}
+print((sort(community_1$hubs, decreasing = TRUE)))
+```
+
+
+- Top gene in module 4 is `r names(sort(community_1$hubs, decreasing = TRUE)[1])`
+- TREM2 or CLU, known AD risk genes expressed on microglia are present here
+- From prior knowledge, many of the genes in module 1 are related to microglial activation pathways 
+
+### Community 2 - Astrocyte
+
+```{r,  warning=FALSE}
+
+community_2=community_graph(igraph=Weights14_up$graph,
+                            community_object=communities14$community_object,
+                            community=2)
+interactive_network(igraph=community_2$graph,communities=FALSE)
+```
+
+
+## Pathway enrichment analysis 
+
+
+```{r}
+functional_enrichment_14=list()
+functional_enrichment_14=lapply(communities14$communities, function(x){
+  communities_l = sub("\\_.*", "",x)
+  pathway_analysis_enrichr(communities_l,plot=20)
+})
+
+```
+
+Here are the biological mechanisms for the microglial module
+
+```{r, echo=FALSE, message=FALSE}
+# Display the dataframe interactively
+datatable(functional_enrichment_14$`1`$GO_Biological_Process_2021, 
+          options = list(pageLength = 10, scrollX = TRUE),
+          rownames = FALSE)
+```
+
+Here are the biological mechanisms for the astrocyte module
+
+```{r, echo=FALSE, message=FALSE}
+datatable(functional_enrichment_14$`2`$GO_Biological_Process_2021, 
+          options = list(pageLength = 10, scrollX = TRUE),
+          rownames = FALSE)
+```
+
+## Modules correlation to neuropathology 
+
+
+`multiomics_modules` compute the module eigen value (PC1 of scaled transcriptomics/proteomics expression) and correlates it to chosen covariates
+
+```{r, message= FALSE, warning=FALSE}
+modules_F14_eigenvalues=multiomics_modules(multiassay=multiomics_regional,
+                              metadata=MOFA2::samples_metadata(integrated_object),
+                              covariates=c('PHF1','amyloid'),
+                              communities=communities14$communities,
+                              filter_string_50=TRUE)
+
+```
+
+
+The slot `modules_F14_eigenvalues$modules_eigen_value` stores the module eigenvalues per sample, which can be correlated to any covariates of interest.
+
+These steps were repeated for Factor 1, Factor 7, anf Factor 11, all significantly associated to AD in order to derive a comprehensive picture of mechanisms at play. These are summarised in the figure below:
+
+```{r, echo=FALSE, fig.width=15, fig.height=8,out.width='80%', out.height='auto'}
+# Set the download directory (temporary directory used here)
+outputDir <- tempdir()
+image_fp <- file.path(outputDir, "circos_modules.png")
+
+# Download the PNG file
+download.file(url = "https://raw.githubusercontent.com/eleonore-schneeg/ProjectData/main/circos_modules.png", 
+              destfile = image_fp, 
+              mode = "wb")
+
+# Show the image in the R Markdown document
+knitr::include_graphics(image_fp)
+```
+
+
+
+#  Part II - Molecular subtyping in the ROSMAP cohort 
+
+Bulk proteomics and transcriptomics data from the ROSMAP cohort was collected from Synapse and processed the same way as step I.
+
+In this part, we focus on early AD Braak III-IV donors (n=132).
+
+```{r}
+multimodal <- readRDS("~/MSD/multimodal.rds")
+multimodal$rna_processed=data.frame(t(multimodal$rna_processed))
+multimodal$protein_processed=data.frame(t(multimodal$protein_processed))
+
+```
+
+## Multiomics clustering with iCluster 
+
+iCluster is an integrative clustering framework designed to jointly analyze multi-omics datasets to uncover shared molecular patterns.By leveraging Bayesian latent variable models, iCluster identifies subgroups based on correlated features across multiple data types, here proteomics and transcriptomics.
+
+
+```{r, eval=FALSE }
+
+int_clust=integrate_with_iCluster(multimodal,
+                                    try.N.clust = 2:4) 
+# m1=clustering_redo$multimodal_object$rna_processed
+# m2=clustering_redo$multimodal_object$protein_processed
+# 
+# 
+# model <- iClusterPlus::iClusterBayes(
+#   dt1 = t(m1),
+#   dt2 = t(m2),
+#   dt3 = NULL, dt4 = NULL, dt5 = NULL, dt6 = NULL,
+#   type = c("gaussian", "gaussian"),
+#   K =1,
+#   n.burnin=18000,
+#   n.draw=12000,prior.gamma=c(0.5,0.5),sdev=0.05,thin=3
+# )
+
+```
+```{r}
+int_clust <- readRDS("~/MSD/int_clust.rds") # load pre-trained model 
+```
+
+
+The optimal number of cluster (i.e. molecular subtypes) is 2.
+
+Posterior probabilities in `int_clust[["model"]][["beta.pp"]]` indicate features driving the cluster assignment.
+
+Let's add the molecular subtype annotation to the metadata 
+
+```{r}
+cog_metadata <- readRDS("~/MSD/cog_metadata.rds")
+cog_metadata$cluster=int_clust$model$clusters
+```
+
+
+## Kaplan Meier analysis 
+
+
+First, we check for survivor bias before Kaplan-Meier analysis to ensure that differences in survival curves are not confounded by unequal follow-up durations or dropout rates across groups, which could skew the results.
+
+```{r ,results='hide', warning=FALSE, message=FALSE}
+
+keep=cog_metadata$years<=12
+ggpubr::ggscatter(cog_metadata,
+                  y = "years", x = "age_death",
+                  add = "reg.line",  # Add regressin line
+                  add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+                  conf.int = TRUE, # Add confidence interval
+                  cor.coef = TRUE, # Add correlation coefficient. see ?stat_cor
+                  cor.coeff.args = list(method = "pearson", label.sep = "\n")
+)+  viridis::scale_color_viridis()+ylab("Number of follow-up years")+xlab("Age at death")
+
+ggpubr::ggscatter(cog_metadata[keep,],
+                  y = "years", x = "age_death",
+                  add = "reg.line",  # Add regressin line
+                  add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+                  conf.int = TRUE, # Add confidence interval
+                  cor.coef = TRUE, # Add correlation coefficient. see ?stat_cor
+                  cor.coeff.args = list(method = "pearson", label.sep = "\n")
+)+  viridis::scale_color_viridis()+ylab("Number of follow-up years")+xlab("Age at death")
+
+
+```
+
+Based on these results, individuals with a follow-up equal or less than 12 years will be kept for Kaplan Meier analysis, and the rest will be filtered out.
+
+Kaplan-Meier analysis to assess delay in AD onset between molecular subgroups
+
+```{r,results='hide', warning=FALSE, message=FALSE}
+
+cog_metadata <- readRDS("~/MSD/cog_metadata.rds")
+cog_metadata$time = ifelse(cog_metadata$turn==0,cog_metadata$age_death ,cog_metadata$age_bl+cog_metadata$year_onset)
+# turn variable is 0 if individual never turns AD, 1 if it turns AD
+#Using age as the time variable for Kaplan-Meier analysis is appropriate when the event of interest (here onset of Alzheimer's Disease) is closely tied to an individual's chronological age.
+
+cog_metadata$time=ifelse(is.na(cog_metadata$time ),cog_metadata$age_death ,cog_metadata$time)
+
+## for survivor bias 
+keep=cog_metadata$years<=12
+
+
+cfit3 <-survfit(Surv(time, turn) ~ cluster  , data = cog_metadata,subset = keep )
+ggsurvplot(cfit3,
+           pval = TRUE, conf.int = F,
+           xlim = c(75,105),
+           break.x.by = 5, 
+           pval.coord = c(75,0.2),
+           risk.table = TRUE, # Add risk table
+           risk.table.col = "strata", # Change risk table color by groups
+           linetype = "strata", # Change line type by groups
+           surv.median.line = "hv", # Specify median survival
+           ggtheme = theme_classic(), # Change ggplot2 theme
+           palette = c("#E7B800", "#2E9FDF"),
+           ylab="Remain without AD",xlab="Age of AD onset")
+
+```
+
+Kaplan-Meier survival analysis revealed that one molecular subgroup had a significantly faster prodromal progression to dementia compared to the other molecular subgroup.
+`Cluster 2` is renamed as the fast progressing cluster 
+
+```{r}
+cog_metadata$cluster_group=ifelse(cog_metadata$cluster==2,"Fast","Slow")
+```
+
+
+#  Part III - Projecting bulk modules eigenvalues from discovery to ROSMAP cohort and assessing subtype differences 
+
+
+## Projecting module eigenvalues from discovery to ROSMAP cohort 
+
+We project all the modules found to be signficantly associated with AD to the ROSMAP cohort. 
+These were selected using differential eigenvalue expression which is detailed in the pre-print.
+
+```{r}
+
+modules_list_omic <- readRDS("~/MSD/modules_list_omic.rds")
+sig_modules <- readRDS("~/MSD/sig_modules.rds")
+
+modules_list_omic =modules_list_omic[sig_modules]
+
+# Create a new list to store only the 'Protein' vectors
+protein_list <- lapply(modules_list_omic, function(x) x$Protein)
+rna_list<- lapply(modules_list_omic, function(x) x$RNA)
+
+
+
+rosmap_RNA=data.frame(t(multimodal$rna_processed))
+rosmap_prot=data.frame(t(multimodal$protein_processed))
+list_eigen=list()
+for(module in sig_modules){
+# Recalculate MEs with color labels
+  rna_f=rna_list[[module]]$feature
+  rna_f=rna_f[which(rna_f %in% colnames(rosmap_RNA))]
+  rna=rosmap_RNA[,rna_f]
+  
+  prot_f=protein_list[[module]]$feature
+  prot_f=prot_f[which(prot_f %in% colnames(rosmap_prot))]
+  prot=rosmap_prot[,prot_f]
+  df=cbind(rna,prot)
+  df_s=scale(df)
+  moduleColors=rep(module,ncol(df))
+  moduleColors=setNames(  moduleColors,colnames(df))
+  
+  list_eigen[[module]] <-data.frame(individualID=rownames(df_s),WGCNA::moduleEigengenes(df_s,
+                                moduleColors)$eigengenes)
+}
+```
+
+
+We can now add the module eigenvalue to the ROSMAP clinical metadata
+
+```{r}
+
+
+df <- Reduce(function(x, y) merge(x, y, by = "individualID", all = TRUE), list_eigen)
+df_long <- df %>%
+  pivot_longer(cols = -individualID, names_to = "variable", values_to = "value")
+
+metadata_long= merge(cog_metadata,df_long, by="individualID")
+
+```
+
+## Compare module eigenvalue between molecular subtypes 
+
+```{r large-plot, fig.width=8, fig.height=15, warning=FALSE}
+
+metadata_long$variable <- sub("ME", "", metadata_long$variable)
+ggplot(metadata_long, aes(x = cluster_group, y = value, fill = cluster_group)) +
+  geom_boxplot(alpha = 0.4, aes(fill = cluster_group), outlier.shape = NA) +
+  geom_jitter(aes(color = cluster_group), alpha = 0.4) +    
+  stat_compare_means(label = "p.signif", ref = "Slow", method = "wilcox") +
+  facet_wrap(~variable, nrow = 4) +  # Set the number of rows for facets
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#2E9FDF", "#E7B800")) +
+  scale_color_manual(values = c("#2E9FDF", "#E7B800"))
+
+
+```
+
+There are singificant differences in module eigenvalue between the fast and slow subtypes, particularly for the microglia `F14_UP_ME1` and astrocyte `F14_UP_ME2` modules.
+
+
+#  Part IV - Relevance for Alector's TREM2 agonist clinical trial stratification
+
+TREM2 agonists, such as AL002 developed by Alector, in phase 2 clinical trial (NCT04592874), exploit this protective role of plaque compaction in early AD, targeting individuals in early AD with mild cognitive impairment (MMSE ≥20).
+
+On November 25th, the trial results showed that the TREM2 agonist was not effective in in slowing disease progression in individuals with early AD.
+
+Conversely, our data indicated that strategies to instead downregulate microglial responses may be a better strategy to prevent further damage in mid-pathology stages (Braak III-IV), at a stage where microglial overactivation most likely exacerbates neuroinflammation. 
+
+```{r}
+cog_metadata$alector= ifelse(cog_metadata$mmse>=20,"Early mmse >=20","Later mmse<20")
+cog_metadata= merge(cog_metadata,df, by="individualID")
+
+
+ggplot(cog_metadata, aes(x = cluster_group, y = MEF14_UP_ME1, fill = cluster_group)) +
+  geom_boxplot(alpha = 0.4, aes(fill = cluster_group), outlier.shape = NA) +
+  geom_jitter(aes(color =  cluster_group), alpha = 0.4) +    
+  stat_compare_means(label = "p.signif", ref="Slow", method = "wilcox") +
+  facet_wrap(~alector) +scale_fill_manual(values=c( "#2E9FDF","#E7B800"))+scale_color_manual(values=c( "#2E9FDF","#E7B800"))+ylab("F14_UP_ME1 - microglia module")
+
+```
+
+The microglial module `F14_UP_ME1`, characteristic of microglial activation (pathways) and containing TREM2 shows elevated in fast progressing patients with mild cognitive impairment (MMSE ≥20), which suggest that reducing these levels might slow Alzheimer's disease progression.
+
+# Conclusions 
+
+**Conclusion**:
+
+This workflow demonstrates how Omix facilitates end-to-end analysis of multi-omics data, uncovering glial mechanisms in AD progression and providing insights into therapeutic strategies.
+
+
+**Part I - Transcriptomics-Proteomics Integration in the Discovery Cohort**
+
+The integration of transcriptomics and proteomics data using Omix successfully identified biologically meaningful multi-omics modules in Alzheimer’s disease. By leveraging MOFA for pseudotemporal multi-omics integration, we uncovered distinct biological mechanisms linked to cognitive decline and neuropathological markers. This step highlights the power of Omix in performing data preprocessing, normalisation, and integration to explore complex relationships between molecular data modalities.
+
+**Part II - Molecular Subtyping in the ROSMAP Cohort**
+
+Multi-omics clustering applied to the ROSMAP cohort stratified individuals into two molecular subgroups with distinct progression rates. Kaplan-Meier survival analysis revealed that one molecular subgroup had a significantly faster prodromal progression to dementia compared to the other molecular subgroup. These findings emphasise the heterogeneity of Alzheimer’s disease and suggest that molecular subtyping can provide clinically relevant insights into disease trajectory.
+
+**Part III - Projecting Modules and Assessing Differences**
+
+The projection of discovery cohort-derived modules to the ROSMAP cohort demonstrated robust module reproducibility and highlighted differential module activity between the fast and slow subgroups. Microglial- and astrocytic-enriched modules showed significant variability in their expression profiles, aligning with known biological differences between the two subgroups. These results suggests that different underlying molecular processes may explain a part of between-patient variability in decline. 
+
+**Part IV - Relevance for Alector's TREM2 agonist clinical trial stratification**
+
+Our findings provide a molecular explanation for the failure of the TREM2 agonist trial in slowing Alzheimer’s progression in early stages. While microglial responses may be protective in early pathology, our data suggest that downregulating microglial overactivation could be more effective in mid-pathology stages. This underscores the importance of stratified therapeutic approaches tailored to the disease stage and molecular subtype, offering a new direction for future clinical trials.
+
+
